@@ -268,7 +268,6 @@ def check_single_item(session: requests.Session, item_config: dict):
                 f"🔥 **Oferta Encontrada!**\n"
                 f"• **Item:** {full_name}\n"
                 f"• **Preço:** {price:,} Zeny (Limite: {max_price:,} Zeny)\n"
-                f"• **Refino Mínimo:** +{min_refine}\n"
                 f"• **Quantidade:** {qty}\n"
                 f"• **Localização:** `{location_str}`\n"
                 f"• **Loja:** {store_name}\n"
