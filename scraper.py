@@ -305,8 +305,12 @@ def run_monitor():
         print("Nenhum item encontrado na planilha ou erro ao carregar o CSV.")
         return
 
-    print(f"\n--- Iniciando ciclo de checagem ({len(items_to_monitor)} itens na planilha) ---")
-    for item_config in items_to_monitor:
+    for count, item_config in enumerate(items_to_monitor, start=1):
+        # A cada 20 itens processados, faz a pausa de 90s para resetar a janela do Cloudflare
+        if count > 1 and (count - 1) % 20 == 0:
+            print(f"\n[⏳] Lote de 20 itens processado. Pausando 90s para resfriar a taxa do Cloudflare...\n")
+            time.sleep(90)
+
         check_single_item(session, item_config)
         time.sleep(DELAY_BETWEEN_ITEMS)
 
