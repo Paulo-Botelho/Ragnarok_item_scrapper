@@ -212,6 +212,7 @@ def check_single_item(session: requests.Session, item_config: dict):
     if min_refine > 0:
         target_label = f"+{min_refine} {target_label}"
 
+    # Loop de tentativa com captura de 429 dentro da exceção
     while True:
         try:
             response = session.get(
@@ -220,23 +221,48 @@ def check_single_item(session: requests.Session, item_config: dict):
                 params=params,
                 timeout=15,
             )
-            
-            if response.status_code == 403:
-                print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Rate Limit (403) na busca inicial de '{target_label}'. Pausando por 5 minutos (300s)...")
+
+            if response.status_code == 429:
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] ⚠️ Rate Limit (429)"
+                    f" detectado na busca inicial de '{target_label}'."
+                    " Pausando por 5 minutos (300s)..."
+                )
                 time.sleep(300)
                 continue
 
             response.raise_for_status()
-            break
+            break  # Sucesso! Sai do loop de retry
 
         except Exception as e:
-            print(f"[{time.strftime('%H:%M:%S')}] Erro na busca por '{target_label}': {e}")
+            err_msg = str(e)
+            # Captura a exceção caso ela venha direto como HTTP Error 429
+            if "429" in err_msg or (
+                hasattr(e, "response")
+                and e.response is not None
+                and e.response.status_code == 429
+            ):
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] ⚠️ Rate Limit (429)"
+                    f" capturado na exceção para '{target_label}'. Pausando por"
+                    " 5 minutos (300s)..."
+                )
+                time.sleep(300)
+                continue  # Retenta a busca do MESMO item
+
+            print(
+                f"[{time.strftime('%H:%M:%S')}] Erro fatal na busca por"
+                f" '{target_label}': {e}"
+            )
             return
 
     items = parse_rsc_payload(response.text)
 
     if not items:
-        print(f"[{time.strftime('%H:%M:%S')}] Checagem '{target_label}': Nenhuma loja encontrada no site.")
+        print(
+            f"[{time.strftime('%H:%M:%S')}] Checagem '{target_label}': Nenhuma"
+            " loja encontrada no site."
+        )
         return
 
     found_cheap = False
@@ -300,9 +326,13 @@ def check_single_item(session: requests.Session, item_config: dict):
     if not found_cheap:
         status_parts = []
         if ignored_price_count > 0:
-            status_parts.append(f"{ignored_price_count} acima do preço máximo")
+            status_parts.append(
+                f"{ignored_price_count} acima do preço máximo"
+            )
         if ignored_refine_count > 0:
-            status_parts.append(f"{ignored_refine_count} com refino abaixo de +{min_refine}")
+            status_parts.append(
+                f"{ignored_refine_count} com refino abaixo de +{min_refine}"
+            )
         if ignored_name_count > 0:
             status_parts.append(f"{ignored_name_count} ignorados por nome")
 
@@ -311,7 +341,10 @@ def check_single_item(session: requests.Session, item_config: dict):
             if status_parts
             else "Nenhum item atendeu aos critérios."
         )
-        print(f"[{time.strftime('%H:%M:%S')}] Checagem '{target_label}': {details_str}")
+        print(
+            f"[{time.strftime('%H:%M:%S')}] Checagem '{target_label}':"
+            f" {details_str}"
+        )
 
 
 def run_monitor():
