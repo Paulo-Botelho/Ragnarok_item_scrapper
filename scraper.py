@@ -3,6 +3,7 @@ import io
 import json
 import re
 import time
+from urllib.parse import quote
 from curl_cffi import requests
 
 # ==========================================
@@ -12,9 +13,9 @@ GOOGLE_SHEET_ID = "15k76ng_hj93Vj73fCGiKHf4QguGQaMTpLp_0eQqD2vM"
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv"
 
 SERVER_TYPE = "NIDHOGG"
-CHECK_INTERVAL = 300  # Tempo entre ciclos (300s = 5 min)
-DELAY_BETWEEN_ITEMS = 3  # Pausa entre requisições
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1551625864888979517/0RpujeI_JAkXTs1Nc7YW4iZktVGATNq6v5z2Fim1EzqlIjVc9QN8WWeJ_AbttvqU1oEv"  # (Opcional) Webhook do Discord
+CHECK_INTERVAL = 300  # Tempo de espera ao fim do ciclo completo (300s = 5 min)
+DELAY_BETWEEN_ITEMS = 3  # Pausa leve entre um item e outro
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1551625864888979517/0RpujeI_JAkXTs1Nc7YW4iZktVGATNq6v5z2Fim1EzqlIjVc9QN8WWeJ_AbttvqU1oEv"
 
 # Hash fixo do Next-Action capturado no DevTools
 NEXT_ACTION_HASH = "4007fc6d83865908f9dc6f5b829ccced4aabbbb4ea"
@@ -29,16 +30,20 @@ HEADERS = {
     "Referer": "https://ro.gnjoyamericas.com/pt/intro/shop-search/trading",
 }
 
+# Controle global de resfriamento para o POST
+CF_BLOCKED_UNTIL = 0
+
 
 def clean_base_name(name: str) -> str:
-    """Remove refinos (+11) e slots ([1], [2]) para comparar apenas o nome base."""
-    name = re.sub(r"^\+\d+\s*", "", name)  # Remove +11 do início
-    name = re.sub(r"\[\d+\]", "", name)  # Remove [1] do final
+    """Remove refinos (+11) e slots ([1], [2]) em qualquer lugar do nome."""
+    name = re.sub(r"\+\d+", "", name)    # Remove +11, +9, etc (em qualquer posição)
+    name = re.sub(r"\[\d+\]", "", name)  # Remove [1], [2], etc
+    name = re.sub(r"\s+", " ", name)     # Corrige espaços duplos
     return name.strip().lower()
 
 
 def extract_refine_level(item_name: str) -> int:
-    """Extrai o número do refino do nome completo (ex: '+11Sapato...' -> 11)."""
+    """Extrai o número do refino do nome completo (ex: '+11Sapato...' ou 'Caixa de Armadura +11' -> 11)."""
     match = re.search(r"\+(\d+)", item_name)
     return int(match.group(1)) if match else 0
 
@@ -100,6 +105,12 @@ def get_item_details(
     store_type: str,
 ) -> dict:
     """Dispara a Server Action POST enviando os cabeçalhos exatos do Next.js."""
+    global CF_BLOCKED_UNTIL
+
+    # Trava global: se tomou 429 recente no POST, ignora buscar os detalhes para resfriar
+    if time.time() < CF_BLOCKED_UNTIL:
+        return {}
+
     svr_id = int(item.get("svrId", 303))
     map_id = int(item.get("mapId", 835))
     ssi = str(item.get("ssi", ""))
@@ -107,10 +118,10 @@ def get_item_details(
     if not ssi:
         return {}
 
-    post_url = f"{URL}?storeType={store_type}&serverType={SERVER_TYPE}&searchWord={search_word}"
+    encoded_search_word = quote(search_word)
+    post_url = f"{URL}?storeType={store_type}&serverType={SERVER_TYPE}&searchWord={encoded_search_word}"
 
-    # Árvore de rotas exigida pelo Next Router do site
-    router_tree = f"%5B%22%22%2C%7B%22children%22%3A%5B%22locale%22%2C%22pt%22%2C%22d%22%2C%7B%22children%22%3A%5B%22(primary)%22%2C%7B%22children%22%3A%5B%22intro%22%2C%7B%22children%22%3A%5B%22shop-search%22%2C%7B%22children%22%3A%5B%22id%22%2C%22trading%22%2C%22d%22%5D%2C%7B%22children%22%3A%5B%22__PAGE__%3F%7B%22storeType%22%3A%22{store_type}%22%2C%22serverType%22%3A%22{SERVER_TYPE}%22%2C%22searchWord%22%3A%22{search_word}%22%7D%22%2C%7B%7D%2C%22pt%2Fintro%2Fshop-search%2Ftrading%3FstoreType%3D{store_type}%26serverType%3D{SERVER_TYPE}%26searchWord%3D{search_word}%22%2C%22refresh%22%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2C%22true%5D"
+    router_tree = f"%5B%22%22%2C%7B%22children%22%3A%5B%22locale%22%2C%22pt%22%2C%22d%22%2C%7B%22children%22%3A%5B%22(primary)%22%2C%7B%22children%22%3A%5B%22intro%22%2C%7B%22children%22%3A%5B%22shop-search%22%2C%7B%22children%22%3A%5B%22id%22%2C%22trading%22%2C%22d%22%5D%2C%7B%22children%22%3A%5B%22__PAGE__%3F%7B%22storeType%22%3A%22{store_type}%22%2C%22serverType%22%3A%22{SERVER_TYPE}%22%2C%22searchWord%22%3A%22{encoded_search_word}%22%7D%22%2C%7B%7D%2C%22pt%2Fintro%2Fshop-search%2Ftrading%3FstoreType%3D{store_type}%26serverType%3D{SERVER_TYPE}%26searchWord%3D{encoded_search_word}%22%2C%22refresh%22%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2C%22true%5D"
 
     post_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -134,11 +145,13 @@ def get_item_details(
         }
     ]
 
+    time.sleep(2.5)  # Pausa leve antes de cada POST
+
     try:
         response = session.post(
             post_url,
             headers=post_headers,
-            data=json.dumps(payload, separators=(",", ":")),  # JSON compacto sem espaços
+            data=json.dumps(payload, separators=(",", ":")),
             timeout=10,
         )
 
@@ -157,6 +170,9 @@ def get_item_details(
                     "xpos": xpos_match.group(1) if xpos_match else "",
                     "ypos": ypos_match.group(1) if ypos_match else "",
                 }
+        elif response.status_code == 429:
+            print("\n⚠️ [!] Cloudflare 429 no POST (Detalhes). Congelando buscas de localização por 300s...\n")
+            CF_BLOCKED_UNTIL = time.time() + 300
         else:
             print(f"Erro na consulta do item (SSI: {ssi}): Status {response.status_code}")
     except Exception as e:
@@ -197,17 +213,27 @@ def check_single_item(session: requests.Session, item_config: dict):
     if min_refine > 0:
         target_label = f"+{min_refine} {target_label}"
 
-    try:
-        response = session.get(
-            URL,
-            headers=HEADERS,
-            params=params,
-            timeout=15,
-        )
-        response.raise_for_status()
-    except Exception as e:
-        print(f"[{time.strftime('%H:%M:%S')}] Erro na busca por '{target_label}': {e}")
-        return
+    # Loop Infinito de Retry para o GET (só sai do loop quando der 200 OK ou erro fatal diferente de 429)
+    while True:
+        try:
+            response = session.get(
+                URL,
+                headers=HEADERS,
+                params=params,
+                timeout=15,
+            )
+            
+            if response.status_code == 429:
+                print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Rate Limit (429) detectado na busca de '{target_label}'. Pausando por 5 minutos (300s)...")
+                time.sleep(300)
+                continue  # Retenta a busca do MESMO item
+
+            response.raise_for_status()
+            break  # Sai do loop while se a requisição for bem-sucedida (Status 200)
+
+        except Exception as e:
+            print(f"[{time.strftime('%H:%M:%S')}] Erro fatal na busca por '{target_label}': {e}")
+            return
 
     items = parse_rsc_payload(response.text)
 
@@ -305,12 +331,9 @@ def run_monitor():
         print("Nenhum item encontrado na planilha ou erro ao carregar o CSV.")
         return
 
-    for count, item_config in enumerate(items_to_monitor, start=1):
-        # A cada 20 itens processados, faz a pausa de 90s para resetar a janela do Cloudflare
-        if count > 1 and (count - 1) % 20 == 0:
-            print(f"\n[⏳] Lote de 20 itens processado. Pausando 90s para resfriar a taxa do Cloudflare...\n")
-            time.sleep(90)
-
+    print(f"\n--- Iniciando ciclo de checagem ({len(items_to_monitor)} itens na planilha) ---")
+    
+    for item_config in items_to_monitor:
         check_single_item(session, item_config)
         time.sleep(DELAY_BETWEEN_ITEMS)
 
