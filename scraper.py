@@ -30,20 +30,17 @@ HEADERS = {
     "Referer": "https://ro.gnjoyamericas.com/pt/intro/shop-search/trading",
 }
 
-# Controle global de resfriamento para o POST
-CF_BLOCKED_UNTIL = 0
-
 
 def clean_base_name(name: str) -> str:
     """Remove refinos (+11) e slots ([1], [2]) em qualquer lugar do nome."""
-    name = re.sub(r"\+\d+", "", name)    # Remove +11, +9, etc (em qualquer posição)
-    name = re.sub(r"\[\d+\]", "", name)  # Remove [1], [2], etc
-    name = re.sub(r"\s+", " ", name)     # Corrige espaços duplos
+    name = re.sub(r"\+\d+", "", name)
+    name = re.sub(r"\[\d+\]", "", name)
+    name = re.sub(r"\s+", " ", name)
     return name.strip().lower()
 
 
 def extract_refine_level(item_name: str) -> int:
-    """Extrai o número do refino do nome completo (ex: '+11Sapato...' ou 'Caixa de Armadura +11' -> 11)."""
+    """Extrai o número do refino do nome completo."""
     match = re.search(r"\+(\d+)", item_name)
     return int(match.group(1)) if match else 0
 
@@ -104,13 +101,7 @@ def get_item_details(
     search_word: str,
     store_type: str,
 ) -> dict:
-    """Dispara a Server Action POST enviando os cabeçalhos exatos do Next.js."""
-    global CF_BLOCKED_UNTIL
-
-    # Trava global: se tomou 429 recente no POST, ignora buscar os detalhes para resfriar
-    if time.time() < CF_BLOCKED_UNTIL:
-        return {}
-
+    """Dispara a Server Action POST para pegar Localização com retry em caso de 429."""
     svr_id = int(item.get("svrId", 303))
     map_id = int(item.get("mapId", 835))
     ssi = str(item.get("ssi", ""))
@@ -145,38 +136,47 @@ def get_item_details(
         }
     ]
 
-    time.sleep(2.5)  # Pausa leve antes de cada POST
+    # Laço Infinito: Tenta pegar a localização até conseguir
+    while True:
+        time.sleep(2.5)  # Pausa leve antes do POST
 
-    try:
-        response = session.post(
-            post_url,
-            headers=post_headers,
-            data=json.dumps(payload, separators=(",", ":")),
-            timeout=10,
-        )
+        try:
+            response = session.post(
+                post_url,
+                headers=post_headers,
+                data=json.dumps(payload, separators=(",", ":")),
+                timeout=10,
+            )
 
-        if response.status_code == 200:
-            text = response.text
+            if response.status_code == 200:
+                text = response.text
 
-            full_name_match = re.search(r'"itemFullName":\s*"([^"]+)"', text)
-            map_match = re.search(r'"mapName":\s*"([^"]+)"', text)
-            xpos_match = re.search(r'"xpos":\s*"([^"]+)"', text)
-            ypos_match = re.search(r'"ypos":\s*"([^"]+)"', text)
+                full_name_match = re.search(r'"itemFullName":\s*"([^"]+)"', text)
+                map_match = re.search(r'"mapName":\s*"([^"]+)"', text)
+                xpos_match = re.search(r'"xpos":\s*"([^"]+)"', text)
+                ypos_match = re.search(r'"ypos":\s*"([^"]+)"', text)
 
-            if full_name_match:
-                return {
-                    "itemFullName": full_name_match.group(1),
-                    "mapName": map_match.group(1) if map_match else "",
-                    "xpos": xpos_match.group(1) if xpos_match else "",
-                    "ypos": ypos_match.group(1) if ypos_match else "",
-                }
-        elif response.status_code == 429:
-            print("\n⚠️ [!] Cloudflare 429 no POST (Detalhes). Congelando buscas de localização por 300s...\n")
-            CF_BLOCKED_UNTIL = time.time() + 300
-        else:
-            print(f"Erro na consulta do item (SSI: {ssi}): Status {response.status_code}")
-    except Exception as e:
-        print(f"Erro ao obter detalhes da loja: {e}")
+                if full_name_match or map_match:
+                    return {
+                        "itemFullName": full_name_match.group(1) if full_name_match else "",
+                        "mapName": map_match.group(1) if map_match else "",
+                        "xpos": xpos_match.group(1) if xpos_match else "",
+                        "ypos": ypos_match.group(1) if ypos_match else "",
+                    }
+                return {} # Falhou ao extrair o JSON mas o status foi 200
+
+            elif response.status_code == 403:
+                print("\n⚠️ [!] Cloudflare 403 ao buscar LOCALIZAÇÃO. Pausando TUDO por 5 minutos (300s)...\n")
+                time.sleep(300)
+                continue  # Retorna ao início do 'while True' e tenta buscar a mesma localização
+
+            else:
+                print(f"Erro na consulta da localização (SSI: {ssi}): Status {response.status_code}")
+                break
+
+        except Exception as e:
+            print(f"Erro ao obter localização da loja: {e}")
+            break
 
     return {}
 
@@ -224,12 +224,12 @@ def check_single_item(session: requests.Session, item_config: dict):
             )
             
             if response.status_code == 429:
-                print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Rate Limit (429) detectado na busca de '{target_label}'. Pausando por 5 minutos (300s)...")
+                print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Rate Limit (429) detectado na busca inicial de '{target_label}'. Pausando por 5 minutos (300s)...")
                 time.sleep(300)
-                continue  # Retenta a busca do MESMO item
+                continue
 
             response.raise_for_status()
-            break  # Sai do loop while se a requisição for bem-sucedida (Status 200)
+            break
 
         except Exception as e:
             print(f"[{time.strftime('%H:%M:%S')}] Erro fatal na busca por '{target_label}': {e}")
@@ -262,7 +262,7 @@ def check_single_item(session: requests.Session, item_config: dict):
 
         # Filtro 2: Preço máximo
         if 0 < price <= max_price:
-            # Consulta os detalhes (com refino real +11 e coordenadas /navi)
+            # Consulta os detalhes (com refino real e coordenadas /navi)
             details = get_item_details(
                 session, item, search_word, store_type
             )
