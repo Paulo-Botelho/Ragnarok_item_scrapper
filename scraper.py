@@ -17,9 +17,6 @@ CHECK_INTERVAL = 300  # Tempo de espera ao fim do ciclo completo (300s = 5 min)
 DELAY_BETWEEN_ITEMS = 3  # Pausa leve entre um item e outro
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1551625864888979517/0RpujeI_JAkXTs1Nc7YW4iZktVGATNq6v5z2Fim1EzqlIjVc9QN8WWeJ_AbttvqU1oEv"
 
-# Hash fixo do Next-Action capturado no DevTools
-NEXT_ACTION_HASH = "4007fc6d83865908f9dc6f5b829ccced4aabbbb4ea"
-
 URL = "https://ro.gnjoyamericas.com/pt/intro/shop-search/trading"
 
 HEADERS = {
@@ -29,6 +26,9 @@ HEADERS = {
     "RSC": "1",
     "Referer": "https://ro.gnjoyamericas.com/pt/intro/shop-search/trading",
 }
+
+# Controle global de resfriamento para o POST
+CF_BLOCKED_UNTIL = 0
 
 
 def clean_base_name(name: str) -> str:
@@ -83,16 +83,20 @@ def load_items_from_sheets(session: requests.Session) -> list:
         return []
 
 
-def parse_rsc_payload(raw_text: str) -> list:
-    """Extrai a lista inicial de lojas retornada pelo servidor."""
+def parse_rsc_payload(raw_text: str):
+    """Extrai a lista de itens e descobre automaticamente o hash do Next-Action."""
+    # Busca dinamicamente a chave da Action, ex: "b":"3xI1hsHhHwx5R00Pe-ZYO"
+    action_match = re.search(r'"b":"([a-zA-Z0-9_-]{15,45})"', raw_text)
+    action_id = action_match.group(1) if action_match else "4007fc6d83865908f9dc6f5b829ccced4aabbbb4ea"
+
     match = re.search(r'\{"queryParams":.*?"totalCount":\d+\}', raw_text)
     if not match:
-        return []
+        return [], action_id
     try:
         data = json.loads(match.group(0))
-        return data.get("list", [])
+        return data.get("list", []), action_id
     except json.JSONDecodeError:
-        return []
+        return [], action_id
 
 
 def get_item_details(
@@ -100,8 +104,14 @@ def get_item_details(
     item: dict,
     search_word: str,
     store_type: str,
+    action_id: str,
 ) -> dict:
-    """Dispara a Server Action POST para pegar Localização com retry em caso de 429."""
+    """Dispara a Server Action POST para pegar Localização com a chave dinâmica do Next.js."""
+    global CF_BLOCKED_UNTIL
+
+    if time.time() < CF_BLOCKED_UNTIL:
+        return {}
+
     svr_id = int(item.get("svrId", 303))
     map_id = int(item.get("mapId", 835))
     ssi = str(item.get("ssi", ""))
@@ -119,7 +129,7 @@ def get_item_details(
         "Accept": "text/x-component",
         "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         "Content-Type": "text/plain;charset=UTF-8",
-        "Next-Action": NEXT_ACTION_HASH,
+        "Next-Action": action_id,  # Usa a chave capturada dinamicamente!
         "Next-Router-State-Tree": router_tree,
         "Origin": "https://ro.gnjoyamericas.com",
         "Referer": post_url,
@@ -136,15 +146,15 @@ def get_item_details(
         }
     ]
 
-    # Laço Infinito: Tenta pegar a localização até conseguir
     while True:
-        time.sleep(2.5)  # Pausa leve antes do POST
+        time.sleep(2.5)
 
         try:
+            # Usando formatação JSON padrão, idêntico ao navegador
             response = session.post(
                 post_url,
                 headers=post_headers,
-                data=json.dumps(payload, separators=(",", ":")),
+                data=json.dumps(payload),
                 timeout=10,
             )
 
@@ -163,12 +173,14 @@ def get_item_details(
                         "xpos": xpos_match.group(1) if xpos_match else "",
                         "ypos": ypos_match.group(1) if ypos_match else "",
                     }
-                return {} # Falhou ao extrair o JSON mas o status foi 200
+                
+                print(f"⚠️ Resposta 200 OK, mas detalhes não vieram. Hash usado: {action_id}")
+                return {}
 
-            elif response.status_code == 403:
-                print("\n⚠️ [!] Cloudflare 403 ao buscar LOCALIZAÇÃO. Pausando TUDO por 5 minutos (300s)...\n")
+            elif response.status_code == 429:
+                print("\n⚠️ [!] Cloudflare 429 ao buscar LOCALIZAÇÃO. Pausando TUDO por 5 minutos (300s)...\n")
                 time.sleep(300)
-                continue  # Retorna ao início do 'while True' e tenta buscar a mesma localização
+                continue
 
             else:
                 print(f"Erro na consulta da localização (SSI: {ssi}): Status {response.status_code}")
@@ -182,7 +194,6 @@ def get_item_details(
 
 
 def send_alert(session: requests.Session, message: str):
-    """Exibe no terminal e envia no Discord se configurado."""
     print(f"\n[!!!] OPORTUNIDADE ENCONTRADA [!!!]\n{message}\n")
     if DISCORD_WEBHOOK_URL:
         try:
@@ -213,7 +224,6 @@ def check_single_item(session: requests.Session, item_config: dict):
     if min_refine > 0:
         target_label = f"+{min_refine} {target_label}"
 
-    # Loop Infinito de Retry para o GET (só sai do loop quando der 200 OK ou erro fatal diferente de 429)
     while True:
         try:
             response = session.get(
@@ -235,7 +245,8 @@ def check_single_item(session: requests.Session, item_config: dict):
             print(f"[{time.strftime('%H:%M:%S')}] Erro fatal na busca por '{target_label}': {e}")
             return
 
-    items = parse_rsc_payload(response.text)
+    # Passamos as duas variáveis: a lista de itens e o action_id que pegamos do HTML
+    items, action_id = parse_rsc_payload(response.text)
 
     if not items:
         print(f"[{time.strftime('%H:%M:%S')}] Checagem '{target_label}': Nenhuma loja encontrada no site.")
@@ -250,7 +261,6 @@ def check_single_item(session: requests.Session, item_config: dict):
         item_name_raw = item.get("itemName", "").strip()
         item_name_clean = clean_base_name(item_name_raw)
 
-        # Filtro 1: Nome base do item
         if exact_name_clean and item_name_clean != exact_name_clean:
             ignored_name_count += 1
             continue
@@ -260,17 +270,15 @@ def check_single_item(session: requests.Session, item_config: dict):
         except ValueError:
             price = 0
 
-        # Filtro 2: Preço máximo
         if 0 < price <= max_price:
-            # Consulta os detalhes (com refino real e coordenadas /navi)
+            # Enviamos o action_id para o request POST!
             details = get_item_details(
-                session, item, search_word, store_type
+                session, item, search_word, store_type, action_id
             )
             full_name = details.get("itemFullName") or item_name_raw
 
             item_refine = extract_refine_level(full_name)
 
-            # Filtro 3: Refino mínimo
             if min_refine > 0 and item_refine < min_refine:
                 ignored_refine_count += 1
                 continue
